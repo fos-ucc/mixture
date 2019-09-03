@@ -1,0 +1,346 @@
+##############################################################
+### 
+###
+###
+
+data interview;
+ set 'J:\SRI\PROJECTS\NTPR Interviews (NTPR I)\Programming Instructions\PRG NTPRI 008 Refining the lives alone variable from the interview dataset 2015-0528 (res 20150601)\interview_alone';
+ proc sort data = interview;
+    by eid;
+ run;
+
+data ntpr;
+ set 'J:\SRI\PROJECTS\NTPR\Programming Instructions\PRG NTPR X\PRG NTPR X Alphabetic\PRG NTPR X T Creating One Unified Dataset with All Variables 2014 0707 (res 0718)\ntpr_extended_v2';
+ proc sort data = ntpr;
+    by episode_id;
+run;
+
+%dorpwv;
+PROC SQL ;
+   CONNECT TO ORACLE AS DORRDB (USER=&NRUSER PASSWORD="&NRPASS" PATH="DORRDB");
+         CREATE TABLE schedule AS
+     SELECT * FROM CONNECTION TO DORRDB
+       (SELECT * 
+   		FROM IPCDW.EPISODE
+   ); 
+QUIT;
+
+proc sql;
+  create table NTPR_data as
+    select schedule.SCHED_CD, schedule.EPISODE_ID, ntpr.mrn12, ntpr.eid, ntpr.episode_id, adate, ntpr.ddate, ntpr.orig_episode_id, ntpr.last_episode_id, ntpr.phcupsg, ntpr.HCUPCODE, ntpr.PAT_ENC_CSN_ID, ntpr.PAT_ID, ntpr.SEX, ntpr.Index_Admission, ntpr.First_Hospitalization, anyrehosp30, death30d, ntpr.FAC_ID, ntpr.LOS_DAY, ntpr.ORIG_FAC_ID, ntpr.AGE_AT_ADMIT, ntpr.LAPS2, ntpr.LAPS2M, ntpr.COPS2, ntpr.CHARLSON_SCORE, ntpr.in_person_interview_ind, ntpr.DischCareOrder, ntpr.riskgroup, ntpr.Parent_30_Count, ntpr.Parent_7_Count, ntpr.yhatc30d_all
+     from schedule
+      right join ntpr
+	   on schedule.EPISODE_ID=ntpr.episode_id;
+QUIT;
+
+proc sql; 
+  create table interview_NTPR_s as
+    select NTPR_data.*, interview.FACILITY_ID, interview.interview_alone
+	  from NTPR_data
+	    right join interview
+		  on NTPR_data.mrn12=interview.mrn12;
+quit;
+
+data interview_NTPR_s (rename=(Parent_30_Count=parent30  Parent_7_Count=parent7 LOS_DAY=los DischCareOrder=dco));
+ set interview_NTPR_s;
+run;
+
+
+proc sort data = interview_NTPR_s;
+    by eid;
+
+*####################  Testing Peter's model ########################*;
+
+
+data test_model;
+  set interview_NTPR_s(where=(in_person_interview_ind=1));
+  if dco = 4 then dco_4=1;
+  if dco < 4 and dco >=0  then dco_4=0;
+  los_30 = min(30,round(los,1));
+  if anyrehosp30=1 
+     or death30d=1
+     then rehosp=1;
+  else 
+     rehosp=0;
+  diff=parent30-parent7; * # in days 8-30 only;
+  if      parent7=0 & diff=0 then pcat=1; * none up to 30 days ago;
+  else if parent7>0 & diff=0 then pcat=2; * 1+ up to 7 days ago, and none 8-30 days ago;
+  else if parent7=0 & diff>0 then pcat=3; * none up to 7 days ago, and 1+ 8-30 days ago;
+  else                            pcat=4; * 1+ up to 7 days ago, and another 1+ 8-30 days ago;
+  pcat_1=(pcat=1);
+  label age='age' 
+	los='los' 
+	cops2='cops2' 
+	laps2='laps2' 
+	laps2dc='laps2dc'
+        los_30='los (max=30)';
+run;
+
+
+proc logistic data=test_model;
+class pcat dco_4;
+model rehosp(event='1') = LAPS2 COPS2 los_30 pcat dco_4/lackfit;
+output out=test_model1 p=phat;
+run;
+
+proc export data = test_model1 dbms=csv outfile="C:\Users\x225867\Desktop\interview_NTPR_2.csv" replace;
+run;
+
+
+*#####################################################################;
+
+proc export data = test_model dbms=csv outfile="C:\Users\x225867\Desktop\interview_NTPR.csv" replace;
+run;
+
+proc export data = NTPR_data dbms=csv outfile="C:\Users\x225867\Desktop\NTPR.csv" replace;
+run;
+
+----------------------------------------------------------------------------------------------------------
+auc <- function(outcome, proba){
+ N = length(proba)
+ N_pos = sum(outcome)
+ df = data.frame(out = outcome, prob = proba)
+ df = df[order(-df$prob),]
+ df$above = (1:N) - cumsum(df$out)
+ return( 1- sum( df$above * df$out ) / (N_pos * (N-N_pos) ) )
+}
+
+R-code
+library(Hmisc)
+
+################********************################
+###*************   Interview Data   *************###
+################********************################
+
+### Import data and make NA values for living status where the interview was not done
+x = read.csv("C:/Users/x225867/Desktop/interview_NTPR_2.csv")
+x = x[-which(is.na(x$phat)),]
+o = order(x$mrn12,x$eid) #Order episode per mrn12
+int = x[o,]
+a = which(int$in_person_interview_ind==1)
+b = a+1
+
+int = cbind(x[a,],plan[a])
+redm =cbind(x[b,],plan[b])
+
+rehosp = ifelse((int$anyrehosp30==1 | int$death30d==1) ,1,0)
+death = ifelse((int[a,"death30d"]==1) ,1,0)
+plan  = ifelse((int[a,"SCHED_CD"]=="Y"),1,0)
+peterhat = int$yhatc30d_all
+
+LAPS2 = int$LAPS2
+COPS2  = int$COPS2
+LOS = int$los_30
+AGE = int$AGE_AT_ADMIT
+livsalon = ifelse((as.vector(int$interview_alone)=="Lives alone"),1,0)
+CHARLY = int$CHARLSON_SCORE
+SEX = ifelse(int$SEX=="M",1,0)
+LAPS_n = (LAPS2-mean(LAPS2,na.rm=T))/sd(LAPS2,na.rm=T)
+COPS_n = COPS2 - mean(COPS2,na.rm=T)/sd(COPS2,na.rm=T)
+AGE_n = AGE - mean(AGE,na.rm=T)
+LOS_n = (sqrt(LOS)-mean(sqrt(LOS),na.rm=T))/sd(sqrt(LOS),na.rm=T)
+
+dco_4 = ifelse(int$dco==4,1,0)
+parent7 = int$parent7
+parent30 = int$parent30
+diff=parent30-parent7; # in days 8-30 only;
+pcat = rep(0,length(diff))
+pcat[which(parent7==0 & diff==0)]=1; 
+pcat[which(parent7>0 & diff==0)]=2; 
+pcat[which(parent7==0 & diff>0)]=3; 
+pcat[which(parent7>0 & diff>0)]=4; 
+#pcat=ifelse((parent7>0 & diff>0),1,0)
+
+outpeter =glm(rehosp~LAPS2+COPS2+LOS+as.factor(dco_4)+as.factor(pcat),family=binomial())
+out =glm(rehosp~LAPS_n+COPS_n+LOS_n+as.factor(dco_4)*as.factor(livsalon)+as.factor(pcat),family=binomial())
+
+pbhat=x$yhatc30d_all
+z = log(pbhat/(1-pbhat))
+
+outb = glm(rehosp~z*as.factor(livsalon),family=binomial())
+
+##########################################################
+### Plots for Rehospitalization Rate vs.important vars.### 
+### COPS2(35,90,250), AGE(65,85,100), LOS(3,6,30))     ###
+### LAPS2 (45,90,250)DCO (dco_4) and pcat(pcat-1)      ###
+### Peter hat(0,0.75,0.1,0.15,0.4,0.8)                 ###
+### Need to change variable in 5 places underneath     ###
+##########################################################
+peterhat = outpeter$fitted.values
+phat = out$fitted.values
+
+### Find significance of contribution of livsalon variable 
+### Found to be (1 - pchisq(5.835,2)) = 0.054
+#pcat_p = pcat-1 # NB this makes the pcat variable go in to first 4 bins
+
+int_var = peterhat/(1-peterhat); ints = 5
+int0 = 0; int1 = 0.075; int2 = 0.1; int3 = 0.15; int4=0.4; int5 =0.8
+
+#int0 = 0; int1 = round(quantile(phat,0.2),digits=3); int2 =round(quantile(phat,0.4),digits=3); 
+#int3 = round(quantile(phat,0.6),digits=3); int4 =round(quantile(phat,0.8),digits=3); 
+#int5 = round(quantile(phat,1),digits=3)
+
+A0h.1 = which(int_var<int1&int_var>=int0&livsalon==0)
+A0h.2 = which(int_var<int2&int_var>=int1&livsalon==0)
+A0h.3 = which(int_var<int3&int_var>=int2&livsalon==0)
+A0h.4 = which(int_var<int4&int_var>=int3&livsalon==0)
+A0h.5 = which(int_var<int5&int_var>=int4&livsalon==0)
+
+A1h.1 = which(int_var<int1&int_var>=int0&livsalon==1)
+A1h.2 = which(int_var<int2&int_var>=int1&livsalon==1)
+A1h.3 = which(int_var<int3&int_var>=int2&livsalon==1)
+A1h.4 = which(int_var<int4&int_var>=int3&livsalon==1)
+A1h.5 = which(int_var<int5&int_var>=int4&livsalon==1)
+
+A0r.1 = which(int_var<int1&int_var>=int0&livsalon==0&rehosp==1)
+A0r.2 = which(int_var<int2&int_var>=int1&livsalon==0&rehosp==1)
+A0r.3 = which(int_var<int3&int_var>=int2&livsalon==0&rehosp==1)
+A0r.4 = which(int_var<int4&int_var>=int3&livsalon==0&rehosp==1)
+A0r.5 = which(int_var<int5&int_var>=int4&livsalon==0&rehosp==1)
+
+A1r.1 = which(int_var<int1&int_var>=int0&livsalon==1&rehosp==1)
+A1r.2 = which(int_var<int2&int_var>=int1&livsalon==1&rehosp==1)
+A1r.3 = which(int_var<int3&int_var>=int2&livsalon==1&rehosp==1)
+A1r.4 = which(int_var<int4&int_var>=int3&livsalon==1&rehosp==1)
+A1r.5 = which(int_var<int5&int_var>=int4&livsalon==1&rehosp==1)
+
+rate_0r = as.numeric(ints)
+rate_1r = as.numeric(ints)
+
+hosp_AGE = rep(0,length(int_var))
+for(i in 1:ints) {
+  Object_0h = get(paste0("A0h.", i))
+  Object_1h = get(paste0("A1h.", i))
+  Object_0r = get(paste0("A0r.", i))
+  Object_1r = get(paste0("A1r.", i))
+  rate_0r[i] = length(Object_0r)/length(Object_0h)
+  rate_1r[i] = length(Object_1r)/length(Object_1h)
+
+  hosp_AGE[c(Object_0h,Object_1h)] = i
+ }
+
+ l0 = as.numeric(ints);l1 = as.numeric(ints)
+ l0[1] = length(A0h.1); l1[1] = length(A1h.1)
+ l0[2] = length(A0h.2); l1[2] = length(A1h.2)
+ if(ints==3) {l0[3] = length(A0h.3); l1[3] = length(A1h.3)};
+ if(ints==4) {l0[3] = length(A0h.3); l1[3] = length(A1h.3)
+              l0[4] = length(A0h.4); l1[4] = length(A1h.4)};
+ if(ints==5) {l0[3] = length(A0h.3); l1[3] = length(A1h.3)
+              l0[4] = length(A0h.4); l1[4] = length(A1h.4)
+	      l0[5] = length(A0h.5); l1[5] = length(A1h.5)};
+
+ error1 = sqrt(rate_1r*(1-rate_1r)/(l1))
+ error0 = sqrt(rate_0r*(1-rate_0r)/(l0))
+
+ plot(rate_1r,col="red",pch=20,ylim = c(0,0.6),main="Rate Comparison-Predicted Probability", ylab="Observed Rehsopitalization Rate",xlab="Expected Rehospitalization Rate",xaxt="n",cex=1.5)
+ par(new=T)
+ plot(rate_0r,col="blue",pch=20,ylim=c(0,0.6),ylab="",xlab="",main="",xaxt="n",cex=1.5)
+ legend("topleft",c("Lives Alone","Lives Accompanied"),col=c("red","blue"),pch=c(20,20),cex=1.5)
+ if(ints==2) axis(1,at=c(1,2,3,4),labels=c(int0,int1,int3,int4))
+
+ if(ints==3) axis(1,at=c(1,2,3),labels=c(paste(int0,"-",int1-1),paste(int1,"-",int2-1),paste(int2,"-",int3-1)))
+ if(ints==4) axis(1,at=c(1,2,3,4),labels=c(paste(int0,"-",int1-1),paste(int1,"-",int2-1),paste(int2,"-",int3-1),paste(int3,"-",int4-1)))
+ if(ints==5) axis(1,at=c(1,2,3,4,5),labels=c(paste(int0,"-",int1),paste(int1,"-",int2),paste(int2,"-",int3),paste(int3,"-",int4),paste(int4,"-",int5)))
+ lines(rate_1r,lty=2,col="red")
+ lines(rate_0r,lty=2,col="blue")
+ par(new=T);  errbar(seq(0,ints-1,1),rate_1r,(rate_1r+error1),(rate_1r-error1),ylim=c(0,0.6),col="red",xlab="Expected Rehospitalization Rate",ylab="",xaxt="n")
+ par(new=T);  errbar(seq(0,ints-1,1),rate_0r,(rate_0r+error0),(rate_0r-error0),ylim=c(0,0.6),col="blue",xlab="",ylab="",xaxt="n")
+
+ odds1 = rate_1r/(1-rate_1r)
+ odds0 = rate_0r/(1-rate_0r)
+ 
+ plot(odds1,col="red",pch=20,ylim = c(0,1),main="Odds Comparison-Predicted Odds", ylab="Odds ratio",xlab="Expected Odds Ratio",xaxt="n",cex=1.5)
+ par(new=T)
+ plot(odds0,col="blue",pch=20,ylim=c(0,1),ylab="",xlab="",main="",xaxt="n",cex=1.5)
+ legend("topleft",c("Lives Alone","Lives Accompanied"),col=c("red","blue"),pch=c(20,20),cex=1.5)
+ if(ints==2) axis(1,at=c(1,2),labels=c(int0,int1))
+ if(ints==3) axis(1,at=c(1,2,3),labels=c(paste(int0,"-",int1-1),paste(int1,"-",int2-1),paste(int2,"-",int3-1)))
+ if(ints==4) axis(1,at=c(1,2,3,4),labels=c(paste(int0,"-",int1-1),paste(int1,"-",int2-1),paste(int2,"-",int3-1),paste(int3,"-",int4-1)))
+ if(ints==5) axis(1,at=c(1,2,3,4,5),labels=c(paste(int0,"-",int1),paste(int1,"-",int2),paste(int2,"-",int3),paste(int3,"-",int4),paste(int4,"-",int5)))
+ lines(odds1,lty=2,col="red")
+ lines(odds0,lty=2,col="blue")
+
+
+
+
+####################################################   
+### New model based on COPS2 and AGE segregation ###
+####################################################
+
+##########################
+### COPS2 Distribution ###
+##########################
+int_var = COPS2; ints = 3
+int0 = 0; int1 = 50; int2 = 80; int3 =250; int4 = 250
+
+B.1 = which(int_var<int1&int_var>=int0)
+B.2 = which(int_var<int2&int_var>=int1)
+B.3 = which(int_var<int3&int_var>=int2)
+B.4 = which(int_var<int4&int_var>=int3)
+hosp_COPS = rep(0,length(int_var))
+for(i in 1:ints) {
+  Object = get(paste0("B.", i))
+  hosp_COPS[Object]=i
+ }
+
+########################
+### Age Distribution ###
+########################
+
+int_var =AGE; ints = 3
+int0 = 0; int1 = 66; int2 = 84; int3 =100; int4 = 100
+
+B.1 = which(int_var<int1&int_var>=int0)
+B.2 = which(int_var<int2&int_var>=int1)
+B.3 = which(int_var<int3&int_var>=int2)
+B.4 = which(int_var<int4&int_var>=int3)
+
+hosp_AGE = rep(0,length(int_var))
+for(i in 1:ints) {
+  Object = get(paste0("B.", i))
+  hosp_AGE[Object]=i
+ }
+
+out =glm(rehosp~LAPS_n+as.factor(hosp_AGE)*as.factor(livsalon)+LOS_n+as.factor(hosp_COPS),family=binomial())
+
+######################################
+### Histograms of Age Distribution ###  
+######################################
+
+ hist(hosp_AGE,ylim=c(0,700),breaks=seq(0,3,1),col="red",main="AGE at hospitalization",xlab="Age Range",ylab="Frequency",xaxt="n")
+ axis(1,at=c(0.5,1.5,2.5),labels=c("0-67","67-83","83-100"))
+ par(new=T)
+ hist(hosp_AGE[which(livsalon==1)],ylim=c(0,700),breaks=seq(0,3,1),col="blue",main="",ylab="",xlab="",xaxt="n") 
+ par(new=T)
+ hist(hosp_AGE[which(rehosp==1)],ylim=c(0,700),breaks=seq(0,3,1),col="yellow",main="",ylab="",xlab="",xaxt="n") 
+ par(new=T)
+ hist(hosp_AGE[which(rehosp==1&livsalon==1)],ylim=c(0,700),breaks=seq(0,3,1),col="green",main="",ylab="",xlab="",xaxt="n") 
+ legend("topright",c("Hospitalization","Lives Alone","Rehospitalization","Lives Alone and Rehospitalized"),col=c("red","blue","yellow","green"),lty=1,lwd=4,cex=0.75)
+
+#######################################
+### Histograms of COPS Distribution ###
+#######################################
+
+ ### Rates of rehospitalization for different COPS2 scores
+
+ a = c(0,50,80,250);
+ z = length(a)
+ for(i in 1:(length(a)-1)){
+   wc = which(COPS2>a[i]&COPS2<=a[i+1])
+   wc_rehosp = which(COPS2>a[i]&COPS2<=a[i+1]&rehosp==1)
+   z[i] =  length(wc_rehosp)/length(wc)
+      print(c(paste("COPS =",a[i],"Hospitalizations =",length(wc),"Rehospitalizations=",length(wc_rehosp),"Rate =",z[i])))
+
+  }
+
+
+ hist(hosp_COPS,ylim=c(0,900),breaks=seq(0,3,1),col="red",main="COPS2 at hospitalization",xlab="COPS2 Score",ylab="Frequency",xaxt="n")
+ axis(1,at=c(0.5,1.5,2.5),labels=c("0-50","50-80","80-250"))
+ par(new=T)
+ hist(hosp_COPS[which(rehosp==1)],ylim=c(0,900),breaks=seq(0,3,1),col="blue",main="",ylab="",xlab="",xaxt="n")  
+ legend("topleft",c("Hospitalization","Rehospitalization"),col=c("red","blue"),lty=1,lwd=4,cex=0.75)
+
+boxplot(COPS2[q.1]~rehosp[C.1])
+boxplot(COPS2[q.2]~rehosp[C.2])
+boxplot(COPS2[q.3]~rehosp[C.3])
+
